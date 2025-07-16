@@ -1,0 +1,151 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:13-alpine
+    container_name: fts-database
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: face_tracking
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fts-network
+
+  # Redis Cache (optional - for future caching features)
+  redis:
+    image: redis:7-alpine
+    container_name: fts-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fts-network
+
+  # Face Tracking Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fts-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Database Configuration
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: face_tracking
+      DB_USER: postgres
+      DB_PASSWORD: password
+      
+      # Security Configuration
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-production-docker}
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 60
+      
+      # Application Configuration
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DEBUG: ${DEBUG:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      
+      # CORS Configuration
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      
+      # Face Recognition Configuration
+      FACE_RECOGNITION_TOLERANCE: ${FACE_RECOGNITION_TOLERANCE:-0.6}
+      FACE_DETECTION_MODEL: ${FACE_DETECTION_MODEL:-hog}
+      FACE_ENCODING_MODEL: ${FACE_ENCODING_MODEL:-large}
+      
+      # Camera Configuration
+      DEFAULT_CAMERA_ID: ${DEFAULT_CAMERA_ID:-0}
+      MAX_CONCURRENT_STREAMS: ${MAX_CONCURRENT_STREAMS:-5}
+      STREAM_QUALITY: ${STREAM_QUALITY:-medium}
+      FRAME_RATE: ${FRAME_RATE:-30}
+      
+      # File Storage
+      UPLOAD_DIR: uploads
+      FACE_IMAGES_DIR: face_images
+      MAX_FILE_SIZE: 10485760
+      
+      # Logging Configuration
+      LOG_FILE: logs/app.log
+      LOG_ROTATION: "1 day"
+      LOG_RETENTION: "30 days"
+    
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+      - ./face_images:/app/face_images
+      # For camera access (if using host cameras)
+      - /dev:/dev
+    
+    devices:
+      # Grant access to video devices for camera streaming
+      - /dev/video0:/dev/video0
+    
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    networks:
+      - fts-network
+
+  # Nginx Reverse Proxy (optional - for production)
+  nginx:
+    image: nginx:alpine
+    container_name: fts-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+    networks:
+      - fts-network
+    profiles:
+      - production
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  fts-network:
+    driver: bridge
+    name: face-tracking-network
